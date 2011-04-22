@@ -87,7 +87,7 @@ supportsEnterLeave = (function() {
  */
 withinElement = function(evt, elem, fallback) {
 	var ret = false,
-	current = evt.relatedTarget || evt[fallback] || false;
+	current = evt.relatedTarget || evt[fallback] || evt.otherTarget || false;
 	if (! current) {return null;}
 	try {
 		while (current && current !== elem) {
@@ -116,6 +116,18 @@ buildEventFunction = function(func, test) {
 },
 
 /**
+ * Performs a boolean xor
+ *
+ * @access  private
+ * @param   mixed     the first test case
+ * @param   mixed     the second test case
+ * @return  boolea
+ */
+xor = function(first, second) {
+	return (!! (!! first) ^ (!! second));
+},
+
+/**
  * Binds an event listener using any available method
  *
  * @access  private
@@ -126,17 +138,8 @@ buildEventFunction = function(func, test) {
  */
 bindEvent = (function() {
 	var method;
-	// Bind using dojo
-	if (dojo && dojo.connect) {
-		method = function(obj, evt, func) {
-			var connection = dojo.connect(obj, evt, func);
-			return function() {
-				dojo.disconnect(connection);
-			};
-		};
-	}
 	// Bind using DOM 1 (standard)
-	else if (document.addEventListener) {
+	if (document.addEventListener) {
 		method = function(obj, evt, func) {
 			obj.addEventListener(evt, func, false);
 			return function() {
@@ -212,55 +215,114 @@ bindMultipleEvents = function(obj, events) {
 },
 
 /**
- * A state object for tracking the last touched element
+ * Adds a related target to an event object
+ *
+ * @access  private
+ * @param   object    the event object
+ * @param   element   the relatedTarget
+ * @param   string    the fallback property (fromElement/toElement)
+ * @return  void
+ */
+addRelatedTarget = (function() {
+	var ret = false;
+	return function(e, targ, fromTo) {
+		if (ret === false) {
+			try {
+				e.relatedTarget = targ;
+				if (e.relatedTarget === targ) {
+					ret = 'relatedTarget';
+				} else {throw null;}
+			} catch (err1) {
+				try {
+					e[fromTo] = targ;
+					if (e[fromTo] === targ) {
+						ret = 'fromTo';
+					} else {throw null;}
+				} catch (err2) {
+					ret = 'otherTarget';
+					e[ret] = targ;
+				}
+			}
+		} else if (ret === 'fromTo') {
+			e[fromTo] = targ;
+		} else {
+			e[ret] = targ;
+		}
+	};
+}()),
+
+/**
+ * Moniter the touch state
  *
  * @access  private
  */
-touchState = (new (function() {
+TouchState = isTouch() ? (new (function() {
 	
-	// Only build it if it's needed
-	if (isTouch()) {
+	var
+	self = this,
+	states = [ ],
+	lastTouched = null;
 	
-		var
-		self = this,
-		touches = [ ],
-		
-		// The event tracker function
-		trackerFunc = function(e) {
-			for (var i = 0, c = e.changedTouches.length; i < c; i++) {
-				touches.push(e.changedTouches[i]);
+	/**
+	 * Check (or set) if the current touch state is in an element
+	 *
+	 * @access  public
+	 * @param   element   the element to test on
+	 * @param   boolean   a new value to set to
+	 * @return  boolean
+	 */
+	self.isIn = function(elem, setTo) {
+		for (var i = 0, c = states.length; i < c; i++) {
+			if (states[i].elem === elem) {
+				if (typeof setTo !== 'undefined') {
+					states[i].flag =!! setTo;
+				}
+				return states[i].flag;
 			}
-		};
-		
-		// Bind the needed tracker events
-		bindMultipleEvents(document, {
-			touchstart: trackerFunc,
-			touchmove: trackerFunc
+		}
+		states.push({
+			elem: elem:
+			flag: (typeof setTo === 'undefined') ? false : (!! setTo)
 		});
-		
-		// Get all of the touches stored
-		self.getTouches = function(before) {
-			var arr = [ ];
-			for (var i = 0, c = touches.length; i < c; i++) {
-				if (touches[i].identifier === before) {break;}
-				arr.push(touches[i]);
-			}
-			return arr;
-		};
-		
-		// Get a specific touch
-		self.getTouch = function(index) {
-			if (index < 0) {
-				index += touches.length - 1;
-			}
-			try {
-				return touches[i] || null;
-			} catch(e) {return null;}
-		};
-		
-	}
+		return states[i].flag;
+	};
 	
-})());
+	/**
+	 * Set all flags to false
+	 *
+	 * @access  public
+	 * @return  void
+	 */
+	self.reset = function() {
+		for (var i = 0, c = states.length; i < c; i++) {
+			states[i].flag = false;
+		}
+	};
+	
+	/**
+	 * "Touch" an element, setting its isIn value to true and setting
+	 * the element as the last touched
+	 *
+	 * @access  public
+	 * @param   element   the element to touch
+	 * @return  void
+	 */
+	self.touch = function(elem) {
+		self.isIn(elem, true);
+		lastTouched = elem;
+	};
+	
+	/**
+	 * Get the last touched element
+	 *
+	 * @access  public
+	 * @return  element
+	 */
+	self.lastTouched = function() {
+		return lastTouched;
+	};
+	
+})()) : null,
 
 /**
  * Creates a invokable callstack (an array of functions that can be called by itself)
@@ -354,8 +416,125 @@ CallStack = (function() {
  */
 CallStack.isCallStack = function(obj) {
 	return (typeof obj === 'function' && obj.toString() === '[function CallStack]');
-};
+},
 
+// ----------------------------------------------------------------------------
+//  The changes to make for touch events
+
+touchEventChanges = {
+	
+	mousedown: {
+		evt: 'touchstart'
+		buildFunc: function(targ, func) {
+			return function(e) {
+				TouchState.touch(targ);
+				return func(e);
+			};
+		}
+	},
+	
+	mouseup: {
+		evt: 'touchend',
+		bindTo: document,
+		buildFunc: function(targ, func) {
+			return function(e) {
+				if (mee.getEventElement(e) === targ) {
+					addRelatedTarget(e, TouchState.lastTouched());
+					var ret = func(e);
+					TouchState.reset();
+					return ret;
+				}
+			};
+		}
+	},
+	
+	mousemove: {
+		evt: 'touchmove',
+		bindTo: document,
+		buildFunc: function(targ, func) {
+			return function(e) {
+				if (mee.getEventElement(e) === targ) {
+					addRelatedTarget(e, TouchState.lastTouched());
+					TouchState.touch(targ);
+					return func(e);
+				}
+			};
+		}
+	},
+	
+	mouseover: {
+		evt: 'touchmove',
+		bindTo: document,
+		buildFunc: function(targ, func) {
+			return function(e) {
+				if (mee.getEventElement(e) === targ && ! TouchState.isIn(targ)) {
+					addRelatedTarget(e, TouchState.lastTouched());
+					TouchState.touch(targ);
+					return func(e);
+				} else {
+					TouchState.isIn(targ, false);
+				}
+			};
+		}
+	},
+	
+	mouseout: {
+		evt: 'touchmove',
+		bindTo: document,
+		buildFunc: function(targ, func) {
+			return function(e) {
+				var evtTarg = mee.getEventElement(e);
+				if (evtTarg !== targ && TouchState.isIn(targ)) {
+					addRelatedTarget(e, evtTarg, 'toElement');
+					TouchState.touch(evtTarg);
+					TouchState.isIn(targ, false);
+					evtTarg = null;
+					return func(e);
+				} else if (evtTarg === targ) {
+					TouchState.isIn(targ, true);
+				}
+				evtTarg = null;
+			};
+		}
+	},
+	
+	mouseenter: {
+		evt: 'touchmove',
+		bindTo: document,
+		buildFunc: function(targ, func) {
+			return function(e) {
+				if (mee.getEventElement(e) === targ && ! TouchState.isIn(targ)) {
+					addRelatedTarget(e, TouchState.lastTouched());
+					TouchState.touch(targ);
+					if (! withinElement(e, targ, 'fromElement')) {
+						return func(e);
+					}
+				}
+			};
+		}
+	},
+	
+	mouseleave: {
+		evt: 'touchmove',
+		bindTo: document,
+		buildFunc: function(targ, func) {
+			return function(e) {
+				var evtTarg = mee.getEventElement(e);
+				if (evtTarg !== targ && TouchState.isIn(targ)) {
+					addRelatedTarget(e, evtTarg, 'toElement');
+					TouchState.touch(evtTarg);
+					TouchState.isIn(targ, false);
+					evtTarg = null;
+					if (! withinElement(e, targ, 'toElement')) {
+						return func(e);
+					}
+				}
+				evtTarg = null;
+			};
+		}
+	}
+	
+};
 
 // ----------------------------------------------------------------------------
 //  External Interface
@@ -388,40 +567,23 @@ window.mee = {
 		ret = false,
 		
 		// A list of events to bind
-		events = false;
+		events = false,
+		
+		// Get the change data for the event
+		eventChanges = touchEventChanges[evt] || false;
 		
 		// Add useful mouse event support for touch devices
-		if (isTouch()) {
-			// The events mousedown/mouseup/mousemove should all be bound at the
-			// document level to avoid a shortcoming in iOS's event target handling
-			if (evt === 'mousedown' || evt === 'mouseup' || evt === 'mousemove') {
-				var origObj = obj; obj = document;
-				func = buildEventFunction(func, function(e) {
-					return (origObj === mee.getEventElement(e));
-				});
+		if (isTouch() && eventChanges) {
+			var target = obj;
+			if (eventChanges.evt) {
+				evt = eventChanges.evt;
 			}
-			switch (evt) {
-				case 'mousedown':
-					evt = 'touchstart';
-				break;
-				case 'mouseup':
-					evt = 'touchend';
-				break;
-				case 'mousemove':
-					evt = 'touchmove';
-				break;
-				case 'mouseover':
-					// TODO This is not emulated at the current time
-				break;
-				case 'mouseout':
-					// TODO This is not emulated at the current time
-				break;
-				case 'mouseenter':
-					// TODO This is not emulated at the current time
-				break;
-				case 'mouseleave':
-					// TODO This is not emulated at the current time
-				break;
+			if (eventChanges.bindTo) {
+				obj = eventChanges.bindTo;
+			}
+			if (eventChanges.buildFunc) {
+				needsBuilding = false;
+				func = eventChanges.buildFunc(target, func);
 			}
 		}
 		
@@ -485,7 +647,7 @@ window.mee = {
 		if (isTouch() && evt.touches && evt.touches[0]) {
 			// Get event target from a touch event
 			var touch = evt.touches[0];
-			targ = document.elementFromPoint(touch.clientX, touch.clientY);
+			targ = document.elementFromPoint(touch.pageX, touch.pageY);
 		} else {
 			// Get the event target
 			if (e.target) {
